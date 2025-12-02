@@ -29,52 +29,104 @@ class GeminiCompanyExtractor:
 
     def _convert_to_dataframe(self, workbook):
         """
-        Convert Excel workbook to DataFrame, prioritizing sheets with 'comps' variations.
+        Convert Excel workbook to DataFrame, identifying both M&A and public comps sheets.
+        Returns: (ma_sheet_data, public_sheet_data, has_ma, has_public)
         """
-        all_data = []
-        sheet_data = {}
-
-        # 1. Identify the best sheet(s) to process
-        target_sheet_names = []
+        ma_sheet_data = {}
+        public_sheet_data = {}
         sheet_names = workbook.sheetnames
         
-        # Regex pattern for flexible matching:
-        # Matches "equity", "trading", "public" followed by anything (or nothing) then "comps"
-        # OR just "comps"
-        # Handles separators like space, underscore, dash, etc.
-        pattern = re.compile(r'(equity|trading|public).*comps|comps', re.IGNORECASE)
+        # Patterns for different comp types
+        # M&A pattern: Must have M&A/transaction/precedent/deal keywords
+        # Matches: "M&A comps", "Transaction comps", "comps M&A", etc.
+        # Does NOT match: just "comps" (that's public)
+        ma_pattern = re.compile(r'(m&a|ma|transaction|precedent|deal|private).*comps|comps.*(m&a|ma|transaction|precedent|deal)', re.IGNORECASE)
         
+        # Public pattern: equity/trading/public comps OR just "comps"
+        # Matches: "Public comps", "Equity comps", "comps", etc.
+        public_pattern = re.compile(r'(equity|trading|public).*comps|^comps$', re.IGNORECASE)
+        
+        ma_sheets = []
+        public_sheets = []
+        
+        # Identify all matching sheets
         for name in sheet_names:
-            if pattern.search(name):
-                target_sheet_names.append(name)
-                # If we found a very specific match, we might stop, but let's collect all candidates
-                # and maybe just pick the first one or all of them? 
-                # User said "one sheet found... matching the name". 
-                # Let's pick the first match as the primary target.
-                break
-        
-        if target_sheet_names:
-            print(f"✅ Found target sheet: {target_sheet_names[0]}")
-        else:
-            # Fallback: Use first 3 sheets
-            target_sheet_names = sheet_names[:3]
-            print(f"⚠️ No 'comps' sheet found. Defaulting to first {len(target_sheet_names)} sheets: {target_sheet_names}")
+            # Skip hidden sheets
+            if workbook[name].sheet_state != 'visible':
+                continue
 
-        # 2. Process the identified sheet(s)
-        for sheet_name in target_sheet_names:
+            name_stripped = name.strip()
+            
+            # Check M&A first (more specific)
+            if ma_pattern.search(name_stripped):
+                ma_sheets.append(name)
+            # Then check public comps
+            elif public_pattern.search(name_stripped):
+                public_sheets.append(name)
+        
+        # Helper to score sheet names for prioritization
+        def score_sheet_name(name):
+            name_lower = name.lower()
+            score = 100 # Base score
+            
+            # Penalize "junk" suffixes
+            if "pitchbook" in name_lower or "capiq" in name_lower or "factset" in name_lower:
+                score -= 50
+            
+            # Boost "sector" or plain names
+            if "sector" in name_lower:
+                score += 20
+            
+            # Prefer shorter names (usually "Public Comps" vs "Public Comps_Pitchbook")
+            score -= len(name)
+            
+            return score
+
+        # Sort and limit to top 2 sheets
+        ma_sheets.sort(key=score_sheet_name, reverse=True)
+        public_sheets.sort(key=score_sheet_name, reverse=True)
+        
+        ma_sheets = ma_sheets[:2]
+        public_sheets = public_sheets[:2]
+        
+        
+        # Process M&A sheets
+        for sheet_name in ma_sheets:
             sheet = workbook[sheet_name]
             data = []
-
             for row in sheet.iter_rows(values_only=True):
-                # Convert row to list, handling None values
                 row_list = [str(cell) if cell is not None else "" for cell in row]
                 data.append(row_list)
-
             df = pd.DataFrame(data)
-            sheet_data[sheet_name] = df
-            all_data.extend(data)
-
-        return sheet_data, all_data
+            ma_sheet_data[sheet_name] = df
+        
+        # Process public comps sheets
+        for sheet_name in public_sheets:
+            sheet = workbook[sheet_name]
+            data = []
+            for row in sheet.iter_rows(values_only=True):
+                row_list = [str(cell) if cell is not None else "" for cell in row]
+                data.append(row_list)
+            df = pd.DataFrame(data)
+            public_sheet_data[sheet_name] = df
+        
+        # Fallback: if no specific sheets found, use first 3 visible sheets as public comps
+        if not ma_sheets and not public_sheets:
+            print(f"⚠️ No 'comps' sheet found. Defaulting to first 3 visible sheets as public comps")
+            visible_sheets = [n for n in sheet_names if workbook[n].sheet_state == 'visible']
+            for sheet_name in visible_sheets[:3]:
+                sheet = workbook[sheet_name]
+                data = []
+                for row in sheet.iter_rows(values_only=True):
+                    row_list = [str(cell) if cell is not None else "" for cell in row]
+                    data.append(row_list)
+                df = pd.DataFrame(data)
+                public_sheet_data[sheet_name] = df
+        
+        has_ma = len(ma_sheet_data) > 0
+        has_public = len(public_sheet_data) > 0
+        
+        return ma_sheet_data, public_sheet_data, has_ma, has_public
 
     def _prepare_context_for_gemini(self, sheet_data, max_chars=3200000):
         """
@@ -117,8 +169,11 @@ class GeminiCompanyExtractor:
         
         return context
 
-    def extract_with_gemini(self, model_name='gemini-2.5-flash'):
-        """Extract company names from Excel using Gemini."""
+    def extract_ma_transactions_with_gemini(self, model_name='gemini-2.5-flash'):
+        """
+        Extract M&A transaction data including target-acquirer pairs and metrics.
+        Returns structured transaction data instead of just company names.
+        """
         try:
             # Load workbook
             if isinstance(self.source, io.BytesIO):
@@ -138,10 +193,345 @@ class GeminiCompanyExtractor:
             raise
 
         # Convert to structured text
-        sheet_data, _ = self._convert_to_dataframe(wb)
-        context = self._prepare_context_for_gemini(sheet_data)
+        ma_sheet_data, _, has_ma, _ = self._convert_to_dataframe(wb)
+        
+        if not has_ma:
+            wb.close()
+            return None
+            
+        context = self._prepare_context_for_gemini(ma_sheet_data)
         wb.close()
 
+        # Create M&A-specific prompt
+        prompt = f"""{context}
+
+TASK: Extract M&A transaction data from the spreadsheet above. DO NOT HALLUCINATE.
+
+IMPORTANT: This is M&A/Transaction/Precedent comps data. Extract transaction pairs and metrics.
+
+Instructions:
+1. Identify columns containing:
+   - Target company names (may be labeled as: Target, Company, Target Name, etc.)
+   - Acquirer/Buyer company names (may be labeled as: Acquirer, Buyer, Purchaser, Bidder, etc.)
+   - Transaction type/description (may be labeled as: Type, Deal Type, Description, etc.)
+   - Financial metrics(Upto 2 decimal points):
+     * Revenue (may be labeled as: Revenue, Sales, Turnover, LTM Revenue, etc.)
+     * Valuation/Enterprise Value (may be labeled as: EV, Enterprise Value, Deal Value, Transaction Value, etc.)
+     * Value/Revenue multiple (may be labeled as: EV/Revenue, EV/Sales, Price/Sales, etc.)
+     * Value/EBITDA multiple (may be labeled as: EV/EBITDA, Price/EBITDA, etc.)
+
+2. CLASSIFY ACQUISITION TYPE:
+   - Compare the Acquirer and Target company.
+   - If the Acquirer is in the SAME industry as the Target company, classify as "Strategic".
+   - If the Acquirer is a Private Equity (PE) fund, investment firm, or financial sponsor, classify as "Financial".
+   - If you cannot determine with confidence, use "Unknown".
+   - Assign this to the field "acquisition_type".
+
+3. Extract ALL transaction records found in the data
+4. Ignore summary rows (Total, Average, Median, Mean, etc.)
+5. Ignore rows with N/A, TBD, or missing critical data
+
+6. Return results as a JSON object with this structure:
+{{
+    "transactions": [
+        {{
+            "target": "Target Company Name",
+            "acquirer": "Acquirer Company Name",
+            "type": "Transaction type or description",
+            "acquisition_type": "Strategic" | "Financial" | "Unknown",
+            "revenue": "Revenue value (with units if available)",
+            "valuation": "Enterprise/Deal value (with units if available)",
+            "ev_revenue": "EV/Revenue multiple",
+            "ev_ebitda": "EV/EBITDA multiple"
+        }},
+        ...
+    ],
+    "count": <number of transactions>
+}}
+
+7. If a metric is not found or not available, use null for that field
+8. Preserve currency symbols and units (e.g., "$500M", "€1.2B")
+
+CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown formatting, no explanations."""
+
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            full_response = response.text
+
+            # Parse JSON response
+            try:
+                # Remove markdown code blocks if present
+                full_response = full_response.replace('```json', '').replace('```', '').strip()
+
+                # Extract JSON from response
+                json_start = full_response.find('{')
+                json_end = full_response.rfind('}') + 1
+
+                if json_start == -1 or json_end == 0:
+                    return None
+
+                json_str = full_response[json_start:json_end]
+                result = json.loads(json_str)
+
+                if "transactions" not in result:
+                    return None
+
+                transactions = result.get("transactions", [])
+
+                self.results = {
+                    "transactions": transactions,
+                    "total_transactions": len(transactions),
+                    "type": "ma_comps"
+                }
+                return self.results
+
+            except json.JSONDecodeError as e:
+                print(f"JSON Decode Error: {e}")
+                return None
+
+        except Exception as e:
+            print(f"Exception during Gemini API call: {e}")
+            return None
+
+
+    def extract_with_gemini(self, model_name='gemini-2.5-flash'):
+        """
+        Extract data from Excel using Gemini.
+        Handles both M&A transactions and public comps, processing both if present.
+        """
+        try:
+            # Load workbook
+            if isinstance(self.source, io.BytesIO):
+                wb = openpyxl.load_workbook(self.source, data_only=True)
+            else:
+                file_ext = os.path.splitext(self.source)[1].lower()
+                if file_ext == ".csv":
+                    df = pd.read_csv(self.source)
+                    buf = io.BytesIO()
+                    df.to_excel(buf, index=False)
+                    buf.seek(0)
+                    wb = openpyxl.load_workbook(buf, data_only=True)
+                else:
+                    wb = openpyxl.load_workbook(self.source, data_only=True)
+        except Exception as e:
+            print(f"ERROR loading workbook: {e}")
+            raise
+
+        # Detect both M&A and public comps sheets
+        ma_sheet_data, public_sheet_data, has_ma, has_public = self._convert_to_dataframe(wb)
+        
+        results = {}
+        
+        # Process M&A sheets if present
+        if has_ma:
+            # Calculate total estimated tokens (approx 4 chars per token)
+            total_chars = sum(len(df.to_string()) for df in ma_sheet_data.values())
+            estimated_tokens = total_chars // 4
+            
+            # Gemini Free Tier Limit: 250,000 tokens per minute
+            # We'll use a safe batch size of ~200,000 tokens
+            BATCH_TOKEN_LIMIT = 200000
+            
+            if estimated_tokens > BATCH_TOKEN_LIMIT:
+                # Split sheets into batches
+                batches = []
+                current_batch = {}
+                current_batch_tokens = 0
+                
+                for sheet_name, df in ma_sheet_data.items():
+                    sheet_tokens = len(df.to_string()) // 4
+                    
+                    if current_batch_tokens + sheet_tokens > BATCH_TOKEN_LIMIT and current_batch:
+                        batches.append(current_batch)
+                        current_batch = {}
+                        current_batch_tokens = 0
+                    
+                    current_batch[sheet_name] = df
+                    current_batch_tokens += sheet_tokens
+                
+                if current_batch:
+                    batches.append(current_batch)
+                
+                # Process each batch
+                all_transactions = []
+                for i, batch in enumerate(batches):
+                    batch_context = self._prepare_context_for_gemini(batch)
+                    batch_results = self._extract_ma_data(batch_context, model_name)
+                    
+                    if batch_results and batch_results.get('transactions'):
+                        all_transactions.extend(batch_results['transactions'])
+                    
+                    # Wait between batches to respect rate limit (if not the last one)
+                    if i < len(batches) - 1:
+                        import time
+                        time.sleep(10)
+                
+                if all_transactions:
+                    results['ma_transactions'] = all_transactions
+                    results['has_ma'] = True
+                    
+            else:
+                # Process all at once if within limits
+                ma_context = self._prepare_context_for_gemini(ma_sheet_data)
+                ma_results = self._extract_ma_data(ma_context, model_name)
+                if ma_results:
+                    results['ma_transactions'] = ma_results.get('transactions', [])
+                    results['has_ma'] = True
+        
+        # Process public comps sheets if present
+        if has_public:
+            # Calculate total estimated tokens
+            total_chars = sum(len(df.to_string()) for df in public_sheet_data.values())
+            estimated_tokens = total_chars // 4
+            
+            # Gemini Free Tier Limit: 250,000 tokens per minute
+            # Use safe batch size
+            BATCH_TOKEN_LIMIT = 200000
+            
+            if estimated_tokens > BATCH_TOKEN_LIMIT:
+                # Split sheets into batches
+                batches = []
+                current_batch = {}
+                current_batch_tokens = 0
+                
+                for sheet_name, df in public_sheet_data.items():
+                    sheet_tokens = len(df.to_string()) // 4
+                    
+                    if current_batch_tokens + sheet_tokens > BATCH_TOKEN_LIMIT and current_batch:
+                        batches.append(current_batch)
+                        current_batch = {}
+                        current_batch_tokens = 0
+                    
+                    current_batch[sheet_name] = df
+                    current_batch_tokens += sheet_tokens
+                
+                if current_batch:
+                    batches.append(current_batch)
+                
+                # Process each batch
+                all_companies = set()
+                for i, batch in enumerate(batches):
+                    batch_context = self._prepare_context_for_gemini(batch)
+                    batch_results = self._extract_public_comps_data(batch_context, model_name)
+                    
+                    if batch_results and batch_results.get('companies'):
+                        all_companies.update(batch_results['companies'])
+                    
+                    # Wait between batches
+                    if i < len(batches) - 1:
+                        import time
+                        time.sleep(10)
+                
+                if all_companies:
+                    results['all_companies'] = all_companies
+                    results['has_public'] = True
+            
+            else:
+                # Process all at once if within limits
+                public_context = self._prepare_context_for_gemini(public_sheet_data)
+                public_results = self._extract_public_comps_data(public_context, model_name)
+                if public_results:
+                    results['all_companies'] = public_results.get('companies', set())
+                    results['has_public'] = True
+        
+        wb.close()
+        
+        # Return combined results
+        if not results:
+            return None
+            
+        # Set type based on what was found
+        if has_ma and has_public:
+            results['type'] = 'both'
+        elif has_ma:
+            results['type'] = 'ma_comps'
+        else:
+            results['type'] = 'public_comps'
+        
+        self.results = results
+        return results
+
+    def _extract_ma_data(self, context, model_name='gemini-2.5-flash'):
+        """Helper method to extract M&A transaction data from context."""
+        prompt = f"""{context}
+
+TASK: Extract M&A transaction data from the spreadsheet above. DO NOT HALLUCINATE.
+
+IMPORTANT: This is M&A/Transaction/Precedent comps data. Extract transaction pairs and metrics.
+
+Instructions:
+1. Identify columns containing:
+   - Target company names (may be labeled as: Target, Company, Target Name, etc.)
+   - Acquirer/Buyer company names (may be labeled as: Acquirer, Buyer, Purchaser, Bidder, etc.)
+   - Transaction type/description (may be labeled as: Type, Deal Type, Description, etc.)
+   - Financial metrics(Upto 2 decimal points):
+     * Revenue (may be labeled as: Revenue, Sales, Turnover, LTM Revenue, etc.)
+     * Valuation/Enterprise Value (may be labeled as: EV, Enterprise Value, Deal Value, Transaction Value, etc.)
+     * Value/Revenue multiple (may be labeled as: EV/Revenue, EV/Sales, Price/Sales, etc.)
+     * Value/EBITDA multiple (may be labeled as: EV/EBITDA, Price/EBITDA, etc.)
+
+2. CLASSIFY ACQUISITION TYPE:
+   - Compare the Acquirer and Target company.
+   - If the Acquirer is in the SAME industry as the Target company, classify as "Strategic".
+   - If the Acquirer is a Private Equity (PE) fund, investment firm, or financial sponsor, classify as "Financial".
+   - If you cannot determine with confidence, use "Unknown".
+   - Assign this to the field "acquisition_type".
+
+3. Extract ALL transaction records found in the data
+4. Ignore summary rows (Total, Average, Median, Mean, etc.)
+5. Ignore rows with N/A, TBD, or missing critical data
+
+6. Return results as a JSON object with this structure:
+{{
+    "transactions": [
+        {{
+            "target": "Target Company Name",
+            "acquirer": "Acquirer Company Name",
+            "type": "Transaction type or description",
+            "acquisition_type": "Strategic" | "Financial" | "Unknown",
+            "revenue": "Revenue value (with units if available)",
+            "valuation": "Enterprise/Deal value (with units if available)",
+            "ev_revenue": "EV/Revenue multiple",
+            "ev_ebitda": "EV/EBITDA multiple"
+        }},
+        ...
+    ],
+    "count": <number of transactions>
+}}
+
+7. If a metric is not found or not available, use null for that field
+8. Preserve currency symbols and units (e.g., "$500M", "€1.2B")
+
+CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown formatting, no explanations."""
+
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            full_response = response.text
+
+            # Parse JSON response
+            full_response = full_response.replace('```json', '').replace('```', '').strip()
+            json_start = full_response.find('{')
+            json_end = full_response.rfind('}') + 1
+
+            if json_start == -1 or json_end == 0:
+                return None
+
+            json_str = full_response[json_start:json_end]
+            result = json.loads(json_str)
+
+            if "transactions" not in result:
+                return None
+
+            return result
+
+        except Exception as e:
+            print(f"Exception during M&A extraction: {e}")
+            return None
+
+    def _extract_public_comps_data(self, context, model_name='gemini-2.5-flash'):
+        """Helper method to extract public comps company names from context."""
         # Create context-aware prompt
         if self.target_company:
             target_context = f"\nTARGET COMPANY CONTEXT: {self.target_company}\n"
@@ -175,37 +565,30 @@ CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown form
             full_response = response.text
 
             # Parse JSON response
-            try:
-                # Remove markdown code blocks if present
-                full_response = full_response.replace('```json', '').replace('```', '').strip()
+            full_response = full_response.replace('```json', '').replace('```', '').strip()
+            json_start = full_response.find('{')
+            json_end = full_response.rfind('}') + 1
 
-                # Extract JSON from response
-                json_start = full_response.find('{')
-                json_end = full_response.rfind('}') + 1
-
-                if json_start == -1 or json_end == 0:
-                    return None
-
-                json_str = full_response[json_start:json_end]
-                result = json.loads(json_str)
-
-                if "companies" not in result:
-                    return None
-
-                companies = result.get("companies", [])
-
-                self.results = {
-                    "all_companies": set(companies),
-                    "total_unique": len(set(companies))
-                }
-                return self.results
-
-            except json.JSONDecodeError as e:
-                print(f"JSON Decode Error: {e}")
+            if json_start == -1 or json_end == 0:
                 return None
 
+            json_str = full_response[json_start:json_end]
+            result = json.loads(json_str)
+
+            if "companies" not in result:
+                return None
+
+            companies = result.get("companies", [])
+            return {
+                "companies": set(companies),
+                "count": len(set(companies))
+            }
+
+        except json.JSONDecodeError as e:
+            print(f"JSON Decode Error: {e}")
+            return None
         except Exception as e:
-            print(f"Exception during Gemini API call: {e}")
+            print(f"Exception during public comps extraction: {e}")
             return None
 
 
