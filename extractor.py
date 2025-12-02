@@ -63,19 +63,36 @@ class GeminiCompanyExtractor:
             # Then check public comps
             elif public_pattern.search(name_stripped):
                 public_sheets.append(name)
+
         
         # Helper to score sheet names for prioritization
         def score_sheet_name(name):
             name_lower = name.lower()
             score = 100 # Base score
             
-            # Penalize "junk" suffixes
-            if "pitchbook" in name_lower or "capiq" in name_lower or "factset" in name_lower:
-                score -= 50
+            # Penalize data source suffixes (with variations)
+            data_sources = [
+                'pitchbook', 'pitch book', 'pitch_book',
+                'capiq', 'cap iq', 'cap_iq', 'capitaliq', 'capital iq', 'capital_iq',
+                'factset', 'fact set', 'fact_set',
+                'crunchbase', 'crunch base', 'crunch_base',
+                'preqin', 'pre qin', 'pre_qin'
+            ]
             
-            # Boost "sector" or plain names
-            if "sector" in name_lower:
-                score += 20
+            for source in data_sources:
+                if source in name_lower:
+                    score -= 50
+                    break  # Only penalize once
+            
+            # Boost sector/industry keywords
+            sector_keywords = [
+                'sector', 'industry', 'domain', 'segment', 'category'
+            ]
+            
+            for keyword in sector_keywords:
+                if keyword in name_lower:
+                    score += 30
+                    break  # Only boost once
             
             # Prefer shorter names (usually "Public Comps" vs "Public Comps_Pitchbook")
             score -= len(name)
@@ -83,12 +100,15 @@ class GeminiCompanyExtractor:
             return score
 
         # Sort and limit to top 2 sheets
-        ma_sheets.sort(key=score_sheet_name, reverse=True)
-        public_sheets.sort(key=score_sheet_name, reverse=True)
+        if ma_sheets:
+            ma_sheets_scored = [(s, score_sheet_name(s)) for s in ma_sheets]
+            ma_sheets_scored.sort(key=lambda x: x[1], reverse=True)
+            ma_sheets = [s for s, _ in ma_sheets_scored[:2]]
         
-        ma_sheets = ma_sheets[:2]
-        public_sheets = public_sheets[:2]
-        
+        if public_sheets:
+            public_sheets_scored = [(s, score_sheet_name(s)) for s in public_sheets]
+            public_sheets_scored.sort(key=lambda x: x[1], reverse=True)
+            public_sheets = [s for s, _ in public_sheets_scored[:2]]
         
         # Process M&A sheets
         for sheet_name in ma_sheets:
@@ -585,10 +605,8 @@ CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown form
             }
 
         except json.JSONDecodeError as e:
-            print(f"JSON Decode Error: {e}")
             return None
         except Exception as e:
-            print(f"Exception during public comps extraction: {e}")
             return None
 
 
