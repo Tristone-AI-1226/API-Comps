@@ -7,24 +7,33 @@ import json
 import re
 from urllib.parse import quote
 from msal import ConfidentialClientApplication
+import time
+from google.api_core import exceptions
 import google.generativeai as genai
 from typing import List, Dict, Optional, Set
 
 class GeminiCompanyExtractor:
-    def __init__(self, source, api_key: str, target_company: str = None, max_sheets: int = 10):
+    def __init__(self, source, api_key: str, target_company: str = None, max_sheets: int = 10, backup_api_key: str = None):
         """
         Initialize the extractor with Gemini integration.
         :param source: file path (str) or BytesIO stream (from SharePoint)
         :param api_key: Google Gemini API Key
         :param target_company: Name of the target company for context-aware extraction
         :param max_sheets: number of sheets to process
+        :param backup_api_key: Optional backup API key for quota exhaustion
         """
         self.source = source
         self.target_company = target_company
         self.max_sheets = max_sheets
+        self.api_key = api_key
+        self.backup_api_key = backup_api_key
         self.results = {}
         
         # Configure Gemini
+        if api_key:
+             masked_key = api_key[:4] + "..." + api_key[-4:]
+        else:
+             print("[ERROR] Gemini API Key is MISSING!")
         genai.configure(api_key=api_key)
 
     def _convert_to_dataframe(self, workbook):
@@ -63,7 +72,6 @@ class GeminiCompanyExtractor:
             # Then check public comps
             elif public_pattern.search(name_stripped):
                 public_sheets.append(name)
-
         
         # Helper to score sheet names for prioritization
         def score_sheet_name(name):
@@ -132,7 +140,7 @@ class GeminiCompanyExtractor:
         
         # Fallback: if no specific sheets found, use first 3 visible sheets as public comps
         if not ma_sheets and not public_sheets:
-            print(f"⚠️ No 'comps' sheet found. Defaulting to first 3 visible sheets as public comps")
+            print(f"[WARN] No 'comps' sheet found. Defaulting to first 3 visible sheets as public comps")
             visible_sheets = [n for n in sheet_names if workbook[n].sheet_state == 'visible']
             for sheet_name in visible_sheets[:3]:
                 sheet = workbook[sheet_name]
@@ -151,174 +159,36 @@ class GeminiCompanyExtractor:
     def _prepare_context_for_gemini(self, sheet_data, max_chars=3200000):
         """
         Prepare Excel data as structured text context for Gemini.
-        
-        Token Limits (Gemini 2.5 Flash):
-        - Input: 1,000,000 tokens (~4M characters)
-        - Output: 65,536 tokens
-        - Ratio: ~4 characters per token
-        
-        This function limits to 3.2M chars (~800K tokens = 80% of capacity)
-        Uses maximum available capacity while leaving 20% safety margin.
         """
         context = "Below is data from an Excel file containing company information:\n\n"
         
         for sheet_name, df in sheet_data.items():
             sheet_context = f"=== SHEET: {sheet_name} ===\n"
-            # With 3.2M char limit, we can handle very large sheets
-            # No row limit - let Gemini handle as much data as possible
-            sheet_str = df.to_string(index=False, max_rows=None)
+            sheet_str = df.head(50).to_json(orient='records')
             
-            # Truncate if still too long
             if len(context) + len(sheet_context) + len(sheet_str) > max_chars:
                 remaining_chars = max_chars - len(context) - len(sheet_context)
                 if remaining_chars > 0:
                     sheet_str = sheet_str[:remaining_chars] + "\n... (truncated due to size limits)"
                 else:
-                    print(f"⚠️ Skipping sheet '{sheet_name}' - context limit reached")
-                    break  # Skip this sheet if we're already at limit
+                    print(f"[WARN] Skipping sheet '{sheet_name}' - context limit reached")
+                    break 
             
             sheet_context += sheet_str
             sheet_context += "\n\n"
             context += sheet_context
         
-        # Final safety check
         if len(context) > max_chars:
             context = context[:max_chars] + "\n... (truncated due to size limits)"
         
-        print(f"📊 Context size: {len(context):,} chars (~{len(context)//4:,} tokens, {(len(context)//4)/10000:.1f}% of 1M limit)")
+        print(f"[STATS] Context size: {len(context):,} chars (~{len(context)//4:,} tokens, {(len(context)//4)/10000:.1f}% of 1M limit)")
         
         return context
 
-    def extract_ma_transactions_with_gemini(self, model_name='gemini-2.5-flash'):
-        """
-        Extract M&A transaction data including target-acquirer pairs and metrics.
-        Returns structured transaction data instead of just company names.
-        """
-        try:
-            # Load workbook
-            if isinstance(self.source, io.BytesIO):
-                wb = openpyxl.load_workbook(self.source, data_only=True)
-            else:
-                file_ext = os.path.splitext(self.source)[1].lower()
-                if file_ext == ".csv":
-                    df = pd.read_csv(self.source)
-                    buf = io.BytesIO()
-                    df.to_excel(buf, index=False)
-                    buf.seek(0)
-                    wb = openpyxl.load_workbook(buf, data_only=True)
-                else:
-                    wb = openpyxl.load_workbook(self.source, data_only=True)
-        except Exception as e:
-            print(f"ERROR loading workbook: {e}")
-            raise
-
-        # Convert to structured text
-        ma_sheet_data, _, has_ma, _ = self._convert_to_dataframe(wb)
-        
-        if not has_ma:
-            wb.close()
-            return None
-            
-        context = self._prepare_context_for_gemini(ma_sheet_data)
-        wb.close()
-
-        # Create M&A-specific prompt
-        prompt = f"""{context}
-
-TASK: Extract M&A transaction data from the spreadsheet above. DO NOT HALLUCINATE.
-
-IMPORTANT: This is M&A/Transaction/Precedent comps data. Extract transaction pairs and metrics.
-
-Instructions:
-1. Identify columns containing:
-   - Target company names (may be labeled as: Target, Company, Target Name, etc.)
-   - Acquirer/Buyer company names (may be labeled as: Acquirer, Buyer, Purchaser, Bidder, etc.)
-   - Transaction type/description (may be labeled as: Type, Deal Type, Description, etc.)
-   - Financial metrics(Upto 2 decimal points):
-     * Revenue (may be labeled as: Revenue, Sales, Turnover, LTM Revenue, etc.)
-     * Valuation/Enterprise Value (may be labeled as: EV, Enterprise Value, Deal Value, Transaction Value, etc.)
-     * Value/Revenue multiple (may be labeled as: EV/Revenue, EV/Sales, Price/Sales, etc.)
-     * Value/EBITDA multiple (may be labeled as: EV/EBITDA, Price/EBITDA, etc.)
-
-2. CLASSIFY ACQUISITION TYPE:
-   - Compare the Acquirer and Target company.
-   - If the Acquirer is in the SAME industry as the Target company, classify as "Strategic".
-   - If the Acquirer is a Private Equity (PE) fund, investment firm, or financial sponsor, classify as "Financial".
-   - If you cannot determine with confidence, use "Unknown".
-   - Assign this to the field "acquisition_type".
-
-3. Extract ALL transaction records found in the data
-4. Ignore summary rows (Total, Average, Median, Mean, etc.)
-5. Ignore rows with N/A, TBD, or missing critical data
-
-6. Return results as a JSON object with this structure:
-{{
-    "transactions": [
-        {{
-            "target": "Target Company Name",
-            "acquirer": "Acquirer Company Name",
-            "type": "Transaction type or description",
-            "acquisition_type": "Strategic" | "Financial" | "Unknown",
-            "revenue": "Revenue value (with units if available)",
-            "valuation": "Enterprise/Deal value (with units if available)",
-            "ev_revenue": "EV/Revenue multiple",
-            "ev_ebitda": "EV/EBITDA multiple"
-        }},
-        ...
-    ],
-    "count": <number of transactions>
-}}
-
-7. If a metric is not found or not available, use null for that field
-8. Preserve currency symbols and units (e.g., "$500M", "€1.2B")
-
-CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown formatting, no explanations."""
-
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            full_response = response.text
-
-            # Parse JSON response
-            try:
-                # Remove markdown code blocks if present
-                full_response = full_response.replace('```json', '').replace('```', '').strip()
-
-                # Extract JSON from response
-                json_start = full_response.find('{')
-                json_end = full_response.rfind('}') + 1
-
-                if json_start == -1 or json_end == 0:
-                    return None
-
-                json_str = full_response[json_start:json_end]
-                result = json.loads(json_str)
-
-                if "transactions" not in result:
-                    return None
-
-                transactions = result.get("transactions", [])
-
-                self.results = {
-                    "transactions": transactions,
-                    "total_transactions": len(transactions),
-                    "type": "ma_comps"
-                }
-                return self.results
-
-            except json.JSONDecodeError as e:
-                print(f"JSON Decode Error: {e}")
-                return None
-
-        except Exception as e:
-            print(f"Exception during Gemini API call: {e}")
-            return None
-
-
     def extract_with_gemini(self, model_name='gemini-2.5-flash'):
         """
-        Extract data from Excel using Gemini.
-        Handles both M&A transactions and public comps, processing both if present.
+        Extract data from Excel using Gemini in a single unified call.
+        Includes robust error handling for 503 (Service Unavailable) and 429 (Resource Exhausted).
         """
         try:
             # Load workbook
@@ -341,272 +211,208 @@ CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown form
         # Detect both M&A and public comps sheets
         ma_sheet_data, public_sheet_data, has_ma, has_public = self._convert_to_dataframe(wb)
         
-        results = {}
+        combined_sheet_data = {}
+        combined_sheet_data.update(ma_sheet_data)
+        combined_sheet_data.update(public_sheet_data)
         
-        # Process M&A sheets if present
-        if has_ma:
-            # Calculate total estimated tokens (approx 4 chars per token)
-            total_chars = sum(len(df.to_string()) for df in ma_sheet_data.values())
-            estimated_tokens = total_chars // 4
-            
-            # Gemini Free Tier Limit: 250,000 tokens per minute
-            # We'll use a safe batch size of ~200,000 tokens
-            BATCH_TOKEN_LIMIT = 200000
-            
-            if estimated_tokens > BATCH_TOKEN_LIMIT:
-                # Split sheets into batches
-                batches = []
-                current_batch = {}
-                current_batch_tokens = 0
-                
-                for sheet_name, df in ma_sheet_data.items():
-                    sheet_tokens = len(df.to_string()) // 4
-                    
-                    if current_batch_tokens + sheet_tokens > BATCH_TOKEN_LIMIT and current_batch:
-                        batches.append(current_batch)
-                        current_batch = {}
-                        current_batch_tokens = 0
-                    
-                    current_batch[sheet_name] = df
-                    current_batch_tokens += sheet_tokens
-                
-                if current_batch:
-                    batches.append(current_batch)
-                
-                # Process each batch
-                all_transactions = []
-                for i, batch in enumerate(batches):
-                    batch_context = self._prepare_context_for_gemini(batch)
-                    batch_results = self._extract_ma_data(batch_context, model_name)
-                    
-                    if batch_results and batch_results.get('transactions'):
-                        all_transactions.extend(batch_results['transactions'])
-                    
-                    # Wait between batches to respect rate limit (if not the last one)
-                    if i < len(batches) - 1:
-                        import time
-                        time.sleep(10)
-                
-                if all_transactions:
-                    results['ma_transactions'] = all_transactions
-                    results['has_ma'] = True
-                    
-            else:
-                # Process all at once if within limits
-                ma_context = self._prepare_context_for_gemini(ma_sheet_data)
-                ma_results = self._extract_ma_data(ma_context, model_name)
-                if ma_results:
-                    results['ma_transactions'] = ma_results.get('transactions', [])
-                    results['has_ma'] = True
-        
-        # Process public comps sheets if present
-        if has_public:
-            # Calculate total estimated tokens
-            total_chars = sum(len(df.to_string()) for df in public_sheet_data.values())
-            estimated_tokens = total_chars // 4
-            
-            # Gemini Free Tier Limit: 250,000 tokens per minute
-            # Use safe batch size
-            BATCH_TOKEN_LIMIT = 200000
-            
-            if estimated_tokens > BATCH_TOKEN_LIMIT:
-                # Split sheets into batches
-                batches = []
-                current_batch = {}
-                current_batch_tokens = 0
-                
-                for sheet_name, df in public_sheet_data.items():
-                    sheet_tokens = len(df.to_string()) // 4
-                    
-                    if current_batch_tokens + sheet_tokens > BATCH_TOKEN_LIMIT and current_batch:
-                        batches.append(current_batch)
-                        current_batch = {}
-                        current_batch_tokens = 0
-                    
-                    current_batch[sheet_name] = df
-                    current_batch_tokens += sheet_tokens
-                
-                if current_batch:
-                    batches.append(current_batch)
-                
-                # Process each batch
-                all_companies = set()
-                for i, batch in enumerate(batches):
-                    batch_context = self._prepare_context_for_gemini(batch)
-                    batch_results = self._extract_public_comps_data(batch_context, model_name)
-                    
-                    if batch_results and batch_results.get('companies'):
-                        all_companies.update(batch_results['companies'])
-                    
-                    # Wait between batches
-                    if i < len(batches) - 1:
-                        import time
-                        time.sleep(10)
-                
-                if all_companies:
-                    results['all_companies'] = all_companies
-                    results['has_public'] = True
-            
-            else:
-                # Process all at once if within limits
-                public_context = self._prepare_context_for_gemini(public_sheet_data)
-                public_results = self._extract_public_comps_data(public_context, model_name)
-                if public_results:
-                    results['all_companies'] = public_results.get('companies', set())
-                    results['has_public'] = True
-        
-        wb.close()
-        
-        # Return combined results
-        if not results:
-            return None
-            
-        # Set type based on what was found
-        if has_ma and has_public:
-            results['type'] = 'both'
-        elif has_ma:
-            results['type'] = 'ma_comps'
-        else:
-            results['type'] = 'public_comps'
-        
-        self.results = results
-        return results
+        if not combined_sheet_data:
+             wb.close()
+             return None
 
-    def _extract_ma_data(self, context, model_name='gemini-2.5-flash'):
-        """Helper method to extract M&A transaction data from context."""
+        # Prepare context
+        context = self._prepare_context_for_gemini(combined_sheet_data)
+        wb.close()
+
+        # Build Unified Prompt
+        target_context = ""
+        if self.target_company:
+            target_context = f"TARGET COMPANY: {self.target_company}\n"
+
         prompt = f"""{context}
 
-TASK: Extract M&A transaction data from the spreadsheet above. DO NOT HALLUCINATE.
+{target_context}TASK: Analyze the provided Excel data to extract competitive intelligence for {self.target_company if self.target_company else "the target company"}.
 
-IMPORTANT: This is M&A/Transaction/Precedent comps data. Extract transaction pairs and metrics.
+You must perform THREE tasks in a single pass:
+1. Extract M&A Transactions
+2. Extract Public Comparable Companies
+3. Classify all entities
 
-Instructions:
-1. Identify columns containing:
-   - Target company names (may be labeled as: Target, Company, Target Name, etc.)
-   - Acquirer/Buyer company names (may be labeled as: Acquirer, Buyer, Purchaser, Bidder, etc.)
-   - Transaction type/description (may be labeled as: Type, Deal Type, Description, etc.)
-   - Financial metrics(Upto 2 decimal points):
-     * Revenue (may be labeled as: Revenue, Sales, Turnover, LTM Revenue, etc.)
-     * Valuation/Enterprise Value (may be labeled as: EV, Enterprise Value, Deal Value, Transaction Value, etc.)
-     * Value/Revenue multiple (may be labeled as: EV/Revenue, EV/Sales, Price/Sales, etc.)
-     * Value/EBITDA multiple (may be labeled as: EV/EBITDA, Price/EBITDA, etc.)
+INSTRUCTIONS:
 
-2. CLASSIFY ACQUISITION TYPE:
-   - Compare the Acquirer and Target company.
-   - If the Acquirer is in the SAME industry as the Target company, classify as "Strategic".
-   - If the Acquirer is a Private Equity (PE) fund, investment firm, or financial sponsor, classify as "Financial".
-   - If you cannot determine with confidence, use "Unknown".
-   - Assign this to the field "acquisition_type".
+1. M&A TRANSACTIONS
+   - Look for transaction/deal lists (Target, Acquirer, Deal Value, etc.).
+   - Extract up to 10 most relevant transactions.
+   - Ignore summary rows (Total, Average, Mean, Median).
+   - Fields to Extract:
+     * Target (Target, Company)
+     * Acquirer (Acquirer, Buyer, Bidder)
+     * Type (Deal Type, Description)
+     * Metrics (Revenue, Valuation/EV, EV/Revenue, EV/EBITDA) - Keep units/currency.
+   - CLASSIFY ACQUISITION TYPE:
+     * "Strategic": Acquirer in SAME/Adjacent industry as Target.
+     * "Financial": Acquirer is PE fund, investment firm, or financial sponsor.
+     * "Unknown": Insufficient info.
 
-3. Extract ALL transaction records found in the data
-4. Ignore summary rows (Total, Average, Median, Mean, etc.)
-5. Ignore rows with N/A, TBD, or missing critical data
+2. PUBLIC COMPS
+   - Look for lists of comparable public companies.
+   - Extract public companies similar to {self.target_company if self.target_company else "the target"}.
+   - CLASSIFY EACH COMPANY:
+     * "Verified": Score >= 70 (Direct competitor, same market/products).
+     * "To Cross-Check": Score < 70 (Indirect, substitute, or unclear).
+   - LIMITS:
+     * Max 10 Verified Competitors.
+     * Max 10 To Cross-Check.
 
-6. Return results as a JSON object with this structure:
+OUTPUT JSON FORMAT:
 {{
-    "transactions": [
-        {{
-            "target": "Target Company Name",
-            "acquirer": "Acquirer Company Name",
-            "type": "Transaction type or description",
-            "acquisition_type": "Strategic" | "Financial" | "Unknown",
-            "revenue": "Revenue value (with units if available)",
-            "valuation": "Enterprise/Deal value (with units if available)",
-            "ev_revenue": "EV/Revenue multiple",
-            "ev_ebitda": "EV/EBITDA multiple"
-        }},
-        ...
+  "ma_transactions": [
+    {{
+      "target": "Target Name",
+      "acquirer": "Acquirer Name",
+      "type": "Deal Type",
+      "acquisition_type": "Strategic|Financial|Unknown",
+      "revenue": "100M",
+      "valuation": "500M",
+      "ev_revenue": "5.0x",
+      "ev_ebitda": "12.5x"
+    }},
+    ...
+  ],
+  "public_comps": {{
+    "verified": [
+      {{"name": "Company A", "score": 95, "reason": "Direct competitor in X space"}},
+      ...
     ],
-    "count": <number of transactions>
+    "to_crosscheck": [
+      {{"name": "Company B", "score": 40, "reason": "Different industry sector"}}
+    ]
+  }}
 }}
 
-7. If a metric is not found or not available, use null for that field
-8. Preserve currency symbols and units (e.g., "$500M", "€1.2B")
-
-CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown formatting, no explanations."""
+CRITICAL: Provide ONLY valid JSON. No markdown formatting.
+"""
+        
+        current_model_name = model_name
+        fallback_model_name = 'gemini-2.5-flash-lite'
+        
+        # State Tracking
+        retries = 0
+        used_backup_key = False
+        
+        # Hard limits on attempts
+        # We model this as a loop where we decide next action: Retry, Backup, Fail
+        attempts = 0
+        max_attempts = 4 # Enough for initial + retries
+        
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                model = genai.GenerativeModel(current_model_name)
+                response = model.generate_content(prompt)
+                full_response = response.text
+                break # Success!
+                
+            except exceptions.ServiceUnavailable:
+                print(f"[WARN] 503 Service Unavailable on attempt {attempts}")
+                # 503 Strategy: Retry 1 (Same) -> Retry 2 (Fallback) -> Fail
+                # We reuse the logic from previous task, but integrated here
+                # Simplified:
+                # If attempt 1 -> Wait 2s -> Retry Same
+                # If attempt 2 -> Wait 2s -> Switch Model -> Retry Fallback
+                # If attempt 3 -> Fail
+                
+                if attempts == 1:
+                    time.sleep(2)
+                    continue
+                elif attempts == 2:
+                    current_model_name = fallback_model_name
+                    time.sleep(2)
+                    continue
+                else:
+                    print("[ERROR] 503 Service Unavailable - All retries exhausted.")
+                    return None
+            
+            except exceptions.ResourceExhausted as e:
+                print(f"[WARN] 429 Resource Exhausted on attempt {attempts}")
+                err_str = str(e)
+                
+                # Check for Quota Limit (PerDay)
+                if "PerDay" in err_str or "Quota" in err_str:
+                    print("[INFO] 429 Type: Quota Limit (PerDay)")
+                    if self.backup_api_key and not used_backup_key:
+                        print("[INFO] Switching to BACKUP API KEY.")
+                        genai.configure(api_key=self.backup_api_key)
+                        used_backup_key = True
+                        # Retry immediately with backup key (same model)
+                        continue
+                    else:
+                        print("[ERROR] Quota limit hit and no backup key available (or already used). Failing.")
+                        return None
+                        
+                else: 
+                    # Default to Rate Limit (PerMinute)
+                    print("[INFO] 429 Type: Rate Limit (PerMinute)")
+                    # Strategy:
+                    # 1. Switch to Fallback Model (gemini-2.5-flash-lite) immediately
+                    # 2. Retry
+                    # 3. If fail -> Error
+                    
+                    if attempts == 1:
+                        print(f"[INFO] Rate limit hit. Switching to fallback model: {fallback_model_name}")
+                        current_model_name = fallback_model_name
+                        continue
+                    else:
+                         print("[ERROR] Rate limit retries exhausted (fallback model failed). Failing.")
+                         return None
+                         
+            except Exception as e:
+                print(f"ERROR in unified extraction: {e}")
+                return None
+        else:
+            # Loop finished without break
+            return None
 
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            full_response = response.text
-
-            # Parse JSON response
+            # clean response
+            
+            # clean response
             full_response = full_response.replace('```json', '').replace('```', '').strip()
             json_start = full_response.find('{')
             json_end = full_response.rfind('}') + 1
-
+            
             if json_start == -1 or json_end == 0:
+                print("ERROR: No JSON found in response")
                 return None
-
+                
             json_str = full_response[json_start:json_end]
             result = json.loads(json_str)
+            
+            # Post-process to ensure structure matches what main.py expects (partially)
+            # We will return the raw unified result, and main.py will handle aggregation.
+            
+            # Add metadata
+            result['type'] = 'unified' # Signal to caller
+            
+            # Capture usage metadata
+            usage = response.usage_metadata
+            usage_stats = {
+                "prompt_token_count": usage.prompt_token_count,
+                "candidates_token_count": usage.candidates_token_count,
+                "total_token_count": usage.total_token_count,
+                "input_char_count": len(prompt)
+            }
+            result['usage'] = usage_stats
 
-            if "transactions" not in result:
-                return None
-
+            # Stats (optional debugging)
+            ma_count = len(result.get('ma_transactions', []))
+            pub_verified_count = len(result.get('public_comps', {}).get('verified', []))
+            pub_check_count = len(result.get('public_comps', {}).get('to_crosscheck', []))
+            
             return result
 
         except Exception as e:
-            print(f"Exception during M&A extraction: {e}")
-            return None
-
-    def _extract_public_comps_data(self, context, model_name='gemini-2.5-flash'):
-        """Helper method to extract public comps company names from context."""
-        # Create context-aware prompt
-        if self.target_company:
-            target_context = f"\nTARGET COMPANY CONTEXT: {self.target_company}\n"
-            target_context += f"IMPORTANT: Use your knowledge of {self.target_company}'s industry, products, and market to filter the extracted companies.\n"
-            target_context += f"Only extract companies that operate in the SAME or CLOSELY RELATED business as {self.target_company}.\n"
-            target_context += f"Exclude companies from completely different industries or product categories.\n\n"
-        else:
-            target_context = ""
-
-        # Create prompt for Gemini
-        prompt = f"""{context}
-
-{target_context}TASK: Extract ALL company names from the data above that are potential competitors or comparable companies.
-
-Instructions:
-- Look for columns containing company names, targets, acquirers, sellers, or similar identifiers
-- Extract only actual company names (exclude headers, totals, averages, summaries)
-- Ignore entries like "N/A", "TBD", "Others", "Mean", "Total", "Average", "Median"
-- Include ALL companies found in the spreadsheet
-- Return the results as a JSON object with the following structure:
-{{
-    "companies": ["Company 1", "Company 2", ...],
-    "count": <number of unique companies>
-}}
-
-CRITICAL: Provide ONLY valid JSON response, no additional text, no markdown formatting, no explanations."""
-
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            full_response = response.text
-
-            # Parse JSON response
-            full_response = full_response.replace('```json', '').replace('```', '').strip()
-            json_start = full_response.find('{')
-            json_end = full_response.rfind('}') + 1
-
-            if json_start == -1 or json_end == 0:
-                return None
-
-            json_str = full_response[json_start:json_end]
-            result = json.loads(json_str)
-
-            if "companies" not in result:
-                return None
-
-            companies = result.get("companies", [])
-            return {
-                "companies": set(companies),
-                "count": len(set(companies))
-            }
-
-        except json.JSONDecodeError as e:
-            return None
-        except Exception as e:
+            print(f"ERROR in unified extraction: {e}")
+            print(f"Full response was: {full_response if 'full_response' in locals() else 'N/A'}")
             return None
 
 
@@ -629,12 +435,14 @@ class CopilotResponseProcessor:
         genai.configure(api_key=api_key)
 
     def extract_file_paths(self):
-        """Extract unique file paths from copilot response and cut at file extension"""
-        # Pattern to match "Full Path: " followed by the path, cut at file extension
+        """Extract unique file paths from copilot response and apply filtering logic."""
+        # Pattern to match "Full Path: " followed by the path, cut at file extraction
         pattern = r'Full Path:\s*(.+?\.(?:xlsx|xls|csv|pptx|pdf))'
         matches = re.findall(pattern, self.copilot_response, re.IGNORECASE)
-        unique_paths = list(set(matches))
-        self.file_paths = [path.strip() for path in unique_paths]
+        unique_paths = list(set([path.strip() for path in matches]))
+        
+        # Apply filtering and balancing logic
+        self.file_paths = self._filter_and_balance_files(unique_paths)
 
         # Extract relative paths starting from "Shared Documents/"
         self.relative_paths = []
@@ -647,94 +455,133 @@ class CopilotResponseProcessor:
 
         return self.file_paths, self.relative_paths
 
-    def classify_competitors_with_gemini(self, all_companies: list, model_name='gemini-2.5-flash'):
+    def _filter_and_balance_files(self, file_paths: List[str]) -> List[str]:
         """
-        Use Gemini to classify extracted companies into verified competitors and to-crosscheck.
+        Filter files to max 4, balancing M&A and Public Comps.
+        Priority: Folder path -> Filename Regex.
         
-        Token Limits (Gemini 2.5 Flash):
-        - Input: 1,000,000 tokens (~4M characters)
-        - Using 80% capacity = 800K tokens available
-        - This allows for ~2000 companies comfortably
+        Logic:
+        - If both exist: Top 2 M&A + Top 2 Public
+        - If only one exists: Top 4 of that type
         """
-        companies_list = sorted(list(all_companies))
+        ma_files = []
+        public_files = []
         
-        # Limit to 2000 companies (80% capacity usage)
-        # Each company name ~30 chars avg, 2000 companies ≈ 60K chars (~15K tokens)
-        # Plus prompt (~2K tokens) = ~17K tokens total
-        # Still leaves room for 783K tokens of Excel data
-        if len(companies_list) > 2000:
-            print(f"⚠️ Warning: {len(companies_list)} companies found. Limiting to 2000 for classification.")
-            companies_list = companies_list[:2000]
+        # Regex patterns
+        ma_pattern = re.compile(r'(m&a|ma|transaction|precedent|deal|private).*comps|comps.*(m&a|ma|transaction|precedent|deal)', re.IGNORECASE)
+        public_pattern = re.compile(r'(equity|trading|public).*comps|^comps', re.IGNORECASE)
         
-        print(f"🔍 Classifying {len(companies_list)} companies for {self.target_company}")
-
-        prompt = f"""You are a business analyst expert specializing in competitive analysis.
-
-TARGET COMPANY: {self.target_company}
-
-EXTRACTED COMPANIES CANDIDATES:
-{json.dumps(companies_list, indent=2)}
-
-TASK: Classify these candidates based on their competitive relationship with {self.target_company}.
-
-RULES:
-1. **STRICTLY** use ONLY the companies provided in the list above. DO NOT add any new companies.
-2. Assign a **Confidence Score (0-100)** representing the strength of the competitive overlap.
-   - 90-100: Direct competitor (same core products/services, same market).
-   - 70-89: Strong competitor (significant overlap).
-   - 50-69: Moderate/Indirect competitor or substitute.
-   - <50: Low relevance or different industry.
-
-CLASSIFICATION CATEGORIES:
-1. **Verified Competitors**: Score >= 70. Direct/Strong competitors.
-2. **To Cross-Check**: Score < 70. Indirect, potential, or unclear competitors.
-
-RESPONSE FORMAT:
-Return a JSON object with two lists. Each item must be an object containing "name" and "score".
-Sort both lists by "score" in DESCENDING order.
-
-{{
-    "verified_competitors": [
-        {{"name": "Company A", "score": 95, "reason": "..."}},
-        {{"name": "Company B", "score": 88, "reason": "..."}}
-    ],
-    "to_crosscheck": [
-        {{"name": "Company C", "score": 45, "reason": "..."}}
-    ],
-    "reasoning": "Brief analysis of the industry context."
-}}"""
-
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            text_response = response.text
-
-            # Remove markdown code blocks if present
-            text_response = text_response.replace('```json', '').replace('```', '').strip()
-
-            # Extract JSON from response
-            json_start = text_response.find('{')
-            json_end = text_response.rfind('}') + 1
-            json_str = text_response[json_start:json_end]
-
-            result = json.loads(json_str)
-
-            self.verified_competitors = result.get("verified_competitors", [])
-            self.to_crosscheck = result.get("to_crosscheck", [])
+        for path in file_paths:
+            # 1. Folder Path Check (Priority)
+            # Normalizing path separators just in case
+            norm_path = path.replace('\\', '/')
             
-            return result
+            if "Relative Valuation/M&A" in norm_path or "Relative Valuation/MA" in norm_path:
+                 ma_files.append(path)
+                 continue
+            elif "Relative Valuation/Public" in norm_path:
+                 public_files.append(path)
+                 continue
+                 
+            # 2. Filename Regex Check (Fallback)
+            filename = os.path.basename(path)
+            if ma_pattern.search(filename):
+                ma_files.append(path)
+            elif public_pattern.search(filename):
+                public_files.append(path)
+            else:
+                # Default fallback if "comps" is in name
+                if "comps" in filename.lower():
+                     public_files.append(path)
+        
+        # Selection Logic
+        final_files = []
+        
+        # Check if both categories exist
+        if ma_files and public_files:
+            # Take up to 2 from each
+            final_files.extend(ma_files[:2])
+            final_files.extend(public_files[:2])
+            
+        elif ma_files:
+            # Only M&A
+            final_files.extend(ma_files[:4])
+            
+        elif public_files:
+            # Only Public
+            final_files.extend(public_files[:4])
+        
+        if not final_files and file_paths:
+             # If no files matched any pattern but paths exist, take top 4 raw to be safe
+             final_files = file_paths[:4]
+            
+        return sorted(list(set(final_files)))
 
-        except Exception as e:
-            print(f"Exception during classification: {e}")
-            # Fallback: put all in to_crosscheck
-            self.to_crosscheck = companies_list
-            return {
-                "verified_competitors": [],
-                "to_crosscheck": companies_list,
-                "verified_count": 0,
-                "crosscheck_count": len(companies_list),
-                "reasoning": "Error during classification, fallback to cross-check."
-            }
+    def aggregate_unified_results(self, all_extraction_results: List[dict]):
+        """
+        Aggregate results from multiple files (unified extraction).
+        - Consolidated M&A transactions.
+        - De-duplicate and sort verified competitors.
+        - De-duplicate and sort to-crosscheck competitors.
+        """
+        all_ma = []
+        verified_map = {} # name -> {score, reason}
+        crosscheck_map = {} # name -> {score, reason}
+        
+        for result in all_extraction_results:
+            if not result:
+                continue
+                
+            # Aggregate M&A
+            if 'ma_transactions' in result:
+                all_ma.extend(result['ma_transactions'])
+                
+            # Aggregate Public Comps
+            if 'public_comps' in result:
+                # Verified
+                for comp in result['public_comps'].get('verified', []):
+                    name = comp.get('name')
+                    if name:
+                        # Keep the one with higher score if duplicate
+                        if name not in verified_map or comp.get('score', 0) > verified_map[name].get('score', 0):
+                             verified_map[name] = comp
+                             
+                # To Cross-check
+                for comp in result['public_comps'].get('to_crosscheck', []):
+                    name = comp.get('name')
+                    if name:
+                        if name not in crosscheck_map or comp.get('score', 0) > crosscheck_map[name].get('score', 0):
+                             crosscheck_map[name] = comp
+        
+        # Final Processing
+        
+        # 1. Verification vs Crosscheck Conflict Resolution
+        # If a company is in both, prioritize Verified
+        for name in list(crosscheck_map.keys()):
+            if name in verified_map:
+                del crosscheck_map[name]
+                
+        # 2. Sort Lists
+        self.verified_competitors = sorted(verified_map.values(), key=lambda x: x.get('score', 0), reverse=True)
+        self.to_crosscheck = sorted(crosscheck_map.values(), key=lambda x: x.get('score', 0), reverse=True)
+        
+        # 3. Apply global limits (optional, but individual file limits are already 10)
+        # We'll keep all for now to maximize recall across files, or limit if total is huge.
+        # Let's limit to top 20 total for now to keep output clean? 
+        # Plan didn't specify global limit, only "Max 10 per category" which was per file prompt.
+        # But user requested "Output Bounds... Gemini output is explicitly capped... Results are ranked...".
+        # Let's stick to the aggregated list as is, maybe top 20 is safe.
+        self.verified_competitors = self.verified_competitors[:20] 
+        self.to_crosscheck = self.to_crosscheck[:20]
+        
+        return {
+            "ma_transactions": all_ma,
+            "verified_competitors": self.verified_competitors,
+            "to_crosscheck": self.to_crosscheck,
+            "verified_count": len(self.verified_competitors),
+            "crosscheck_count": len(self.to_crosscheck),
+            "ma_count": len(all_ma)
+        }
 
 def get_graph_token(tenant_id, client_id, client_secret):
     """Get Microsoft Graph API access token."""

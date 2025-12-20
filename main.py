@@ -22,6 +22,7 @@ CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 DRIVE_ID = os.getenv("DRIVE_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY_BACKUP = os.getenv("GEMINI_API_KEY_BACKUP")
 
 class AnalysisRequest(BaseModel):
     copilot_response: str
@@ -46,6 +47,7 @@ class AnalysisResponse(BaseModel):
     files_processed: int
     total_files_found: int
     failed_files: list
+    
     cached: bool = False  # Indicates if result came from cache
 
 def get_cache_key(target_company: str, file_paths: list) -> str:
@@ -141,12 +143,38 @@ def analyze_competitors(request: AnalysisRequest):
         # 3. Check Cache
         cache_key = get_cache_key(request.target_company, file_paths)
         if cache_key in analysis_cache:
-            print(f"✅ Cache hit for {request.target_company} (key: {cache_key})")
             cached_result = analysis_cache[cache_key]
-            cached_result.cached = True
-            return cached_result
+            
+            # Check if the cached result was a "silent failure"
+            # 1. Total file failure: All files failed (partial failure is okay)
+            all_files_failed = (len(cached_result.failed_files) == cached_result.total_files_found) and (cached_result.total_files_found > 0)
+            
+            # 2. significant data missing based on type
+            data_missing = False
+            dtype = cached_result.data_type
+            
+            if dtype == 'public_comps':
+                # invalid if no competitors found at all
+                data_missing = (cached_result.verified_count == 0 and cached_result.crosscheck_count == 0)
+            elif dtype == 'ma_comps':
+                # invalid if no transactions found
+                data_missing = (cached_result.transaction_count == 0)
+            elif dtype == 'both':
+                # invalid if EVERYTHING is missing
+                data_missing = (cached_result.verified_count == 0 and cached_result.crosscheck_count == 0 and cached_result.transaction_count == 0)
+            
+            is_silent_failure = all_files_failed or data_missing
+            
+            if is_silent_failure:
+                print(f"[WARN] Ignoring cached result for {request.target_company} (key: {cache_key})")
+                print(f"   Reason: All files failed? {all_files_failed}, Data missing? {data_missing} (Type: {dtype})")
+                # checking logic proceeds to process...
+            else:
+                print(f"[HIT] Cache hit for {request.target_company} (key: {cache_key})")
+                cached_result.cached = True
+                return cached_result
         
-        print(f"🔄 Cache miss for {request.target_company} (key: {cache_key}). Processing...")
+        print(f"[MISS] Cache miss for {request.target_company} (key: {cache_key}). Processing...")
 
         # 3. Authenticate with SharePoint
         try:
@@ -155,91 +183,73 @@ def analyze_competitors(request: AnalysisRequest):
             raise HTTPException(status_code=500, detail=f"SharePoint Authentication failed: {str(e)}")
 
         # 4. Process Files
-        all_competitors_set = set()
-        all_ma_transactions = []
+        all_extraction_results = []
         failed_files = []
         processed_count = 0
         
-        has_ma_data = False
-        has_public_data = False
-
+        # Usage Accumulators
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_input_chars = 0
+        per_file_usage = []
+        
         for rel_path, full_path in zip(relative_paths, file_paths):
             try:
                 # Download file
                 file_stream = download_file_from_sharepoint(access_token, DRIVE_ID, rel_path)
+                file_size = file_stream.getbuffer().nbytes
                 
                 # Extract companies or transactions
                 extractor = GeminiCompanyExtractor(
                     source=file_stream, 
                     api_key=GEMINI_API_KEY,
-                    target_company=request.target_company
+                    target_company=request.target_company,
+                    backup_api_key=GEMINI_API_KEY_BACKUP
                 )
                 
                 results = extractor.extract_with_gemini()
                 
                 if results:
-                    result_type = results.get("type")
+                    all_extraction_results.append(results)
+                    processed_count += 1
                     
-                    # Handle different result types
-                    if result_type == "both":
-                        # Both M&A and public comps present
-                        has_ma_data = True
-                        has_public_data = True
-                        
-                        # Extract M&A transactions
-                        if results.get("ma_transactions"):
-                            transactions = results["ma_transactions"]
-                            all_ma_transactions.extend(transactions)
-                        
-                        # Extract public comps
-                        if results.get("all_companies"):
-                            companies = results["all_companies"]
-                            all_competitors_set.update(companies)
-                        
-                        processor.file_wise_companies[full_path] = f"Both: {len(results.get('ma_transactions', []))} transactions, {len(results.get('all_companies', []))} companies"
-                        processed_count += 1
-                        
-                    elif result_type == "ma_comps":
-                        # Only M&A data
-                        has_ma_data = True
-                        transactions = results.get("ma_transactions", [])
-                        all_ma_transactions.extend(transactions)
-                        processor.file_wise_companies[full_path] = f"M&A Transactions: {len(transactions)}"
-                        processed_count += 1
-                        
-                    elif result_type == "public_comps" or results.get("all_companies"):
-                        # Only public comps data
-                        has_public_data = True
-                        companies = results.get("all_companies", set())
-                        processor.file_wise_companies[full_path] = list(companies)
-                        all_competitors_set.update(companies)
-                        processed_count += 1
-                    else:
-                        failed_files.append({"path": rel_path, "error": "No data extracted"})
+                    # Accumulate Usage - REMOVED
+                    pass
+                    
+                    # Update file logging info
+                    ma_count = len(results.get('ma_transactions', []))
+                    pub_verified = len(results.get('public_comps', {}).get('verified', []))
+                    pub_check = len(results.get('public_comps', {}).get('to_crosscheck', []))
+                    processor.file_wise_companies[full_path] = f"Extracted: {ma_count} M&A, {pub_verified} Verified, {pub_check} Check"
+                    
                 else:
                     failed_files.append({"path": rel_path, "error": "No results returned"})
-                    
             except Exception as e:
+                print(f"[ERROR] ERROR processing file {rel_path}: {str(e)}")
                 failed_files.append({"path": rel_path, "error": str(e)})
                 continue
         
-        # Determine final data type based on aggregated results
-        if has_ma_data and has_public_data:
-            data_type = 'both'
-        elif has_ma_data:
-            data_type = 'ma_comps'
-        else:
-            data_type = 'public_comps'
-
-        # 5. Build Response based on data type
-        # 5. Build Response based on data type
+        # 5. Aggregate and Build Response
+        aggregated = processor.aggregate_unified_results(all_extraction_results)
         
-        # Helper to sort and limit M&A transactions
+        # Determine overall data type based on existence of data
+        has_ma = aggregated['ma_count'] > 0
+        has_public = aggregated['verified_count'] > 0 or aggregated['crosscheck_count'] > 0
+
+        if processed_count == 0 and len(failed_files) > 0:
+            final_type = 'error'
+        elif has_ma and has_public:
+            final_type = 'both'
+        elif has_ma:
+            final_type = 'ma_comps'
+        else:
+            final_type = 'public_comps'
+
+        # Helper to sort and limit M&A transactions (consistent with previous logic)
         def process_ma_transactions(transactions):
             # Sort by number of non-null metrics
             def count_metrics(t):
                 metrics = ['revenue', 'valuation', 'ev_revenue', 'ev_ebitda']
-                # Check if metric exists and is not None/null string
                 count = 0
                 for m in metrics:
                     val = t.get(m)
@@ -247,81 +257,39 @@ def analyze_competitors(request: AnalysisRequest):
                         count += 1
                 return count
             
-            # Sort descending by metric count
             transactions.sort(key=count_metrics, reverse=True)
-            # Limit to 20
             return transactions[:20]
 
-        if data_type == 'both':
-            # Both M&A and public comps - return both with verification for public comps
-            classification_result = processor.classify_competitors_with_gemini(list(all_competitors_set)) if all_competitors_set else {}
+        final_ma_txs = process_ma_transactions(aggregated['ma_transactions'])
+
+        result = AnalysisResponse(
+            target_company=request.target_company,
+            data_type=final_type,
             
-            # Limit lists
-            verified = classification_result.get("verified_competitors", [])[:20]
-            crosscheck = classification_result.get("to_crosscheck", [])[:20]
-            ma_txs = process_ma_transactions(all_ma_transactions)
+            # M&A Data
+            ma_transactions=final_ma_txs,
+            transaction_count=len(final_ma_txs),
             
-            result = AnalysisResponse(
-                target_company=request.target_company,
-                data_type='both',
-                ma_transactions=ma_txs,
-                transaction_count=len(ma_txs),
-                verified_competitors=verified,
-                to_crosscheck=crosscheck,
-                verified_count=len(verified),
-                crosscheck_count=len(crosscheck),
-                reasoning=classification_result.get("reasoning", ""),
-                files_processed=processed_count,
-                total_files_found=len(file_paths),
-                failed_files=failed_files,
-                cached=False
-            )
+            # Public Comps Data
+            verified_competitors=aggregated['verified_competitors'],
+            to_crosscheck=aggregated['to_crosscheck'],
+            verified_count=aggregated['verified_count'],
+            crosscheck_count=aggregated['crosscheck_count'],
             
-        elif data_type == 'ma_comps':
-            # Only M&A data
-            ma_txs = process_ma_transactions(all_ma_transactions)
-            
-            result = AnalysisResponse(
-                target_company=request.target_company,
-                data_type='ma_comps',
-                ma_transactions=ma_txs,
-                transaction_count=len(ma_txs),
-                verified_competitors=[],
-                to_crosscheck=[],
-                verified_count=0,
-                crosscheck_count=0,
-                reasoning="",
-                files_processed=processed_count,
-                total_files_found=len(file_paths),
-                failed_files=failed_files,
-                cached=False
-            )
-            
-        else:
-            # Default to public comps
-            classification_result = processor.classify_competitors_with_gemini(list(all_competitors_set)) if all_competitors_set else {}
-            
-            # Limit lists
-            verified = classification_result.get("verified_competitors", [])[:20]
-            crosscheck = classification_result.get("to_crosscheck", [])[:20]
-            
-            result = AnalysisResponse(
-                target_company=request.target_company,
-                data_type='public_comps',
-                verified_competitors=verified,
-                to_crosscheck=crosscheck,
-                verified_count=len(verified),
-                crosscheck_count=len(crosscheck),
-                reasoning=classification_result.get("reasoning", ""),
-                files_processed=processed_count,
-                total_files_found=len(file_paths),
-                failed_files=failed_files,
-                cached=False
-            )
+            # Metadata
+            reasoning="Unified Extraction with Unified Reasoning", # Simplified reasoning
+            files_processed=processed_count,
+            total_files_found=len(file_paths),
+            failed_files=failed_files,
+            cached=False
+        )
         
-        # 6. Store in cache
-        analysis_cache[cache_key] = result
-        print(f"💾 Cached result for {request.target_company} (key: {cache_key})")
+        # 6. Store in cache (ONLY if not error)
+        if final_type != 'error':
+            analysis_cache[cache_key] = result
+            print(f"[SAVED] Cached result for {request.target_company} (key: {cache_key})")
+        else:
+            print(f"[SKIP-CACHE] Result type is 'error', not caching.")
         
         return result
 
