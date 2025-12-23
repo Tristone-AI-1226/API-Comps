@@ -166,15 +166,13 @@ def analyze_competitors(request: AnalysisRequest):
             is_silent_failure = all_files_failed or data_missing
             
             if is_silent_failure:
-                print(f"[WARN] Ignoring cached result for {request.target_company} (key: {cache_key})")
-                print(f"   Reason: All files failed? {all_files_failed}, Data missing? {data_missing} (Type: {dtype})")
-                # checking logic proceeds to process...
+                # Ignore cached silent failures and reprocess
+                pass
             else:
-                print(f"[HIT] Cache hit for {request.target_company} (key: {cache_key})")
                 cached_result.cached = True
                 return cached_result
         
-        print(f"[MISS] Cache miss for {request.target_company} (key: {cache_key}). Processing...")
+        # Cache miss - process request
 
         # 3. Authenticate with SharePoint
         try:
@@ -287,9 +285,6 @@ def analyze_competitors(request: AnalysisRequest):
         # 6. Store in cache (ONLY if not error)
         if final_type != 'error':
             analysis_cache[cache_key] = result
-            print(f"[SAVED] Cached result for {request.target_company} (key: {cache_key})")
-        else:
-            print(f"[SKIP-CACHE] Result type is 'error', not caching.")
         
         return result
 

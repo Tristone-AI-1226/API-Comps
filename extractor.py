@@ -140,7 +140,7 @@ class GeminiCompanyExtractor:
         
         # Fallback: if no specific sheets found, use first 3 visible sheets as public comps
         if not ma_sheets and not public_sheets:
-            print(f"[WARN] No 'comps' sheet found. Defaulting to first 3 visible sheets as public comps")
+            # No comps sheets found - use first 3 visible sheets as fallback
             visible_sheets = [n for n in sheet_names if workbook[n].sheet_state == 'visible']
             for sheet_name in visible_sheets[:3]:
                 sheet = workbook[sheet_name]
@@ -171,8 +171,7 @@ class GeminiCompanyExtractor:
                 if remaining_chars > 0:
                     sheet_str = sheet_str[:remaining_chars] + "\n... (truncated due to size limits)"
                 else:
-                    print(f"[WARN] Skipping sheet '{sheet_name}' - context limit reached")
-                    break 
+                    break  # Context limit reached 
             
             sheet_context += sheet_str
             sheet_context += "\n\n"
@@ -180,8 +179,6 @@ class GeminiCompanyExtractor:
         
         if len(context) > max_chars:
             context = context[:max_chars] + "\n... (truncated due to size limits)"
-        
-        print(f"[STATS] Context size: {len(context):,} chars (~{len(context)//4:,} tokens, {(len(context)//4)/10000:.1f}% of 1M limit)")
         
         return context
 
@@ -313,7 +310,6 @@ CRITICAL: Provide ONLY valid JSON. No markdown formatting.
                 break # Success!
                 
             except exceptions.ServiceUnavailable:
-                print(f"[WARN] 503 Service Unavailable on attempt {attempts}")
                 # 503 Strategy: Retry 1 (Same) -> Retry 2 (Fallback) -> Fail
                 # We reuse the logic from previous task, but integrated here
                 # Simplified:
@@ -333,7 +329,6 @@ CRITICAL: Provide ONLY valid JSON. No markdown formatting.
                     return None
             
             except exceptions.ResourceExhausted as e:
-                print(f"[WARN] 429 Resource Exhausted on attempt {attempts}")
                 err_str = str(e)
                 
                 # Check for Quota Limit (PerDay)
@@ -358,7 +353,6 @@ CRITICAL: Provide ONLY valid JSON. No markdown formatting.
                     # 3. If fail -> Error
                     
                     if attempts == 1:
-                        print(f"[INFO] Rate limit hit. Switching to fallback model: {fallback_model_name}")
                         current_model_name = fallback_model_name
                         continue
                     else:
@@ -594,7 +588,9 @@ def get_graph_token(tenant_id, client_id, client_secret):
         if "access_token" in token:
             return token["access_token"]
         else:
-            raise Exception("No access token in response")
+            error_desc = token.get("error_description", "No error description")
+            error_code = token.get("error", "Unknown error")
+            raise Exception(f"No access token in response. Error: {error_code} - {error_desc}")
     except Exception as e:
         raise Exception(f"Error getting token: {e}")
 
