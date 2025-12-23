@@ -438,14 +438,31 @@ class CopilotResponseProcessor:
         # Apply filtering and balancing logic
         self.file_paths = self._filter_and_balance_files(unique_paths)
 
-        # Extract relative paths starting from "Shared Documents/"
+        # Extract relative paths and normalize them for SharePoint structure
+        # Note: Drive ID points to "Shared Documents", so paths should NOT include it
         self.relative_paths = []
         for path in self.file_paths:
-            if "Shared Documents/" in path:
-                relative_path = path.split("Shared Documents/", 1)[1]
-                self.relative_paths.append(relative_path)
+            # First, remove "Shared Documents/" if present (Drive ID handles this)
+            if path.startswith("Shared Documents/"):
+                path = path.replace("Shared Documents/", "", 1)
+            
+            # Now handle the remaining path
+            # If path already starts with "All Documents/", use it as-is
+            if path.startswith("All Documents/"):
+                relative_path = path
+            # M&A Comps and Public Comps are subfolders under Relative Valuation
+            elif path.startswith("M&A Comps/") or path.startswith("Public Comps/"):
+                relative_path = f"All Documents/Repository of Past Work/Relative Valuation/{path}"
+            # Relative Valuation and Buyers List go under Repository of Past Work
+            elif path.startswith("Relative Valuation/") or path.startswith("Buyers List/"):
+                relative_path = f"All Documents/Repository of Past Work/{path}"
+            elif path.startswith("Repository of Past Work/"):
+                relative_path = f"All Documents/{path}"
             else:
-                self.relative_paths.append(path)
+                # Unknown format, keep as-is
+                relative_path = path
+            
+            self.relative_paths.append(relative_path)
 
         return self.file_paths, self.relative_paths
 
