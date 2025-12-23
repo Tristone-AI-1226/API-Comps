@@ -5,164 +5,149 @@
     {
       "name": "PepsiCo, Inc. (NasdaqGS:PEP)",
       "score": 95,
-      "reason": "Global leader in soft drinks, snacks, and juices, direct competitor across multiple segments."
-    },
-    {
-      "name": "Britvic",
-      "score": 95,
-      "reason": "Major direct competitor in the non-alcoholic beverage and soft drink market."
+      "reason": "Direct global competitor in soft drinks, juices, and snacks."
     },
     {
       "name": "Keurig Dr Pepper Inc. (NasdaqGS:KDP)",
       "score": 90,
-      "reason": "Major North American beverage company with diverse portfolio including soft drinks, coffee, and water."
+      "reason": "Major competitor in soft drinks, coffee, and other non-alcoholic beverages in North America."
     },
     {
       "name": "A.G. Barr",
       "score": 90,
-      "reason": "Direct competitor in the non-alcoholic beverage market, particularly soft drinks."
+      "reason": "Direct competitor in the soft drinks and beverages market."
+    },
+    {
+      "name": "Britvic",
+      "score": 90,
+      "reason": "Direct competitor in the soft drinks and fruit juice market."
     },
     {
       "name": "Monster Beverage Corporation (NasdaqGS:MNST)",
       "score": 85,
-      "reason": "Leading energy drink company, direct competitor in the energy beverage segment."
-    },
-    {
-      "name": "Nongfu Spring Co., Ltd. (SEHK:9633)",
-      "score": 80,
-      "reason": "Leading Chinese bottled water and beverage company, strong presence in Asia."
-    },
-    {
-      "name": "National Beverage Corp. (NASDAQGS:FIZZ)",
-      "score": 80,
-      "reason": "Key player in sparkling water (LaCroix) and other soft drinks in the US market."
-    },
-    {
-      "name": "Fevertree Drinks",
-      "score": 80,
-      "reason": "Premium mixer beverage company, operating in an adjacent segment of the broader beverage industry."
+      "reason": "Leading energy drink company, a significant non-alcoholic beverage category."
     },
     {
       "name": "Britvic plc (LSE:BVIC)",
-      "score": 75,
-      "reason": "Prominent European soft drinks company with strong regional brands."
+      "score": 80,
+      "reason": "Major European soft drinks company, direct competitor in several markets."
     },
     {
-      "name": "Suntory Beverage & Food Limited (TSE:2587)",
+      "name": "Nongfu Spring Co., Ltd. (SEHK:9633)",
+      "score": 78,
+      "reason": "Leading bottled water and beverage company in China, highly relevant in a key market."
+    },
+    {
+      "name": "National Beverage Corp. (NASDAQGS:FIZZ)",
       "score": 75,
-      "reason": "Diversified Japanese beverage company with strong market presence in Asia."
+      "reason": "Produces sparkling waters and soft drinks, competing in similar product categories."
+    },
+    {
+      "name": "Fevertree Drinks",
+      "score": 75,
+      "reason": "Competitor in the premium mixer and non-alcoholic beverage segment, adjacent to Coca-Cola's broader portfolio."
     },
     {
       "name": "Nichols plc (AIM:NICL)",
       "score": 70,
-      "reason": "UK-based soft drinks company with established regional brands."
+      "reason": "UK-based soft drinks manufacturer with several brands."
+    },
+    {
+      "name": "The Vita Coco Company, Inc. (NASDAQGS:COCO)",
+      "score": 70,
+      "reason": "Specializes in coconut water and plant-based drinks, targeting the growing health beverage market."
+    },
+    {
+      "name": "Primo Water Corporation (TSX:PRMW)",
+      "score": 70,
+      "reason": "Significant player in bottled water, a core segment for Coca Cola."
     },
     {
       "name": "Lifedrink Company, Inc. (TSE:2585)",
       "score": 70,
-      "reason": "Japanese beverage company with a diversified portfolio of soft drinks, water, and tea."
-    },
-    {
-      "name": "A.G. BARR p.l.c. (LSE:BAG)",
-      "score": 70,
-      "reason": "UK soft drinks company known for regional brands and broader beverage offerings."
+      "reason": "Japanese beverage company producing soft drinks and waters."
     }
   ],
   "to_crosscheck": [
     {
-      "name": "Primo Water Corporation (TSX:PRMW)",
-      "score": 65,
-      "reason": "Primarily focused on water delivery and filtration services, less direct soft drink competition."
-    },
-    {
-      "name": "Hey Song Corporation (TWSE:1234)",
-      "score": 65,
-      "reason": "Taiwanese beverage company, strong regional presence but smaller scale."
-    },
-    {
       "name": "Fevertree Drinks PLC (AIM:FEVR)",
-      "score": 60,
-      "reason": "Specializes in premium mixers, a niche market compared to Coca-Cola's broad portfolio."
-    },
-    {
-      "name": "The Vita Coco Company, Inc. (NASDAQGS:COCO)",
-      "score": 60,
-      "reason": "Focused on coconut water and plant-based beverages, a health-oriented niche."
+      "score": 65,
+      "reason": "Specializes in premium mixers, a niche non-alcoholic category that complements alcoholic beverages rather than being a standalone drink for mass consumption like most Coca-Cola products."
     }
   ],
   "verified_count": 13,
-  "crosscheck_count": 4,
+  "crosscheck_count": 1,
   "reasoning": "Unified Extraction with Unified Reasoning",
   "ma_transactions": [
-    {
-      "target": "LevlUp GmbH",
-      "acquirer": "Glanbia plc (ISE:GL9)",
-      "type": "Strategic",
-      "acquisition_type": "Strategic",
-      "revenue": "30.2 AUD Million",
-      "valuation": "88.8 AUD Million",
-      "ev_revenue": "2.9x",
-      "ev_ebitda": "NA"
-    },
     {
       "target": "Coca-Cola Amatil",
       "acquirer": "Coca-Cola European Partners (LON: CCEP)",
       "type": "Strategic",
       "acquisition_type": "Strategic",
-      "revenue": "4931.1 AUD Million",
-      "valuation": "8660.0 AUD Million",
-      "ev_revenue": "1.8x",
-      "ev_ebitda": "13.4x"
+      "revenue": "4931.115 AUD Million",
+      "valuation": "8660.018798 AUD Million",
+      "ev_revenue": "1.7561989120107724",
+      "ev_ebitda": "13.361752141578718"
+    },
+    {
+      "target": "Coca-Cola East Japan Co., Ltd.",
+      "acquirer": "Coca-Cola Bottlers Japan Holdings Inc. (TSE:2579)",
+      "type": "Strategic",
+      "acquisition_type": "Strategic",
+      "revenue": "6732.787457764577 AUD Million",
+      "valuation": "3394.10509128261 AUD Million",
+      "ev_revenue": "NA",
+      "ev_ebitda": "5.89515753022418"
+    },
+    {
+      "target": "Keurig Dr Pepper Inc. (NasdaqGS:KDP)",
+      "acquirer": "Acorn Holdings B.V.",
+      "type": "Sponsor",
+      "acquisition_type": "Financial",
+      "revenue": "6217.022082018927 AUD Million",
+      "valuation": "19707.96 AUD Million",
+      "ev_revenue": "3.17",
+      "ev_ebitda": "13.43"
+    },
+    {
+      "target": "Refresco Group N.V.",
+      "acquirer": "British Columbia Investment Management Corporation; PAI Partners",
+      "type": "Sponsor",
+      "acquisition_type": "Financial",
+      "revenue": "3446.6728448782824 AUD Million",
+      "valuation": "3369.24720603317 AUD Million",
+      "ev_revenue": "0.977536121839888",
+      "ev_ebitda": "10.9769260719566"
+    },
+    {
+      "target": "Lotte Chilsung Beverage Co., Ltd. (KOSE:A005300)",
+      "acquirer": "LOTTE Corporation (KOSE:A004990)",
+      "type": "Strategic",
+      "acquisition_type": "Strategic",
+      "revenue": "2760.293577981651 AUD Million",
+      "valuation": "3008.72 AUD Million",
+      "ev_revenue": "1.09",
+      "ev_ebitda": "13.19"
+    },
+    {
+      "target": "Sumol+Compal, S.A.",
+      "acquirer": "Refrigor - SGPS, S.A.",
+      "type": "Strategic",
+      "acquisition_type": "Strategic",
+      "revenue": "470.4525547445255 AUD Million",
+      "valuation": "644.52 AUD Million",
+      "ev_revenue": "1.37",
+      "ev_ebitda": "10.51"
     },
     {
       "target": "Fever-Tree (LON: FEVR)",
       "acquirer": "Smithson Investment Trust (LON: SSON)",
       "type": "Strategic",
       "acquisition_type": "Financial",
-      "revenue": "486.2 AUD Million",
-      "valuation": "2186.1 AUD Million",
-      "ev_revenue": "4.5x",
-      "ev_ebitda": "14.2x"
-    },
-    {
-      "target": "Cott Beverages LLC",
-      "acquirer": "Refresco Group B.V.",
-      "type": "Strategic",
-      "acquisition_type": "Strategic",
-      "revenue": "112.8 AUD Million",
-      "valuation": "70.5 AUD Million",
-      "ev_revenue": "0.6x",
-      "ev_ebitda": "NA"
-    },
-    {
-      "target": "The Chill Group",
-      "acquirer": "Life On Earth (PINX: LFER)",
-      "type": "Strategic",
-      "acquisition_type": "Strategic",
-      "revenue": "1.5 AUD Million",
-      "valuation": "2.1 AUD Million",
-      "ev_revenue": "1.4x",
-      "ev_ebitda": "NA"
-    },
-    {
-      "target": "Etablissements Geyer Freres",
-      "acquirer": "Royal Unibrew A/S (CPSE:RBREW)",
-      "type": "Strategic",
-      "acquisition_type": "Strategic",
-      "revenue": "61.6 AUD Million",
-      "valuation": "140.3 AUD Million",
-      "ev_revenue": "2.3x",
-      "ev_ebitda": "NA"
-    },
-    {
-      "target": "Bev.Con ApS",
-      "acquirer": "Royal Unibrew A/S (CPSE:RBREW)",
-      "type": "Strategic",
-      "acquisition_type": "Strategic",
-      "revenue": "42.3 AUD Million",
-      "valuation": "74.0 AUD Million",
-      "ev_revenue": "1.8x",
-      "ev_ebitda": "11.3x"
+      "revenue": "486.22499999999997 AUD Million",
+      "valuation": "2186.1000000000004 AUD Million",
+      "ev_revenue": "4.496066635816753",
+      "ev_ebitda": "14.179801517805021"
     },
     {
       "target": "Old Orchard Brands",
@@ -170,29 +155,29 @@
       "type": "Strategic",
       "acquisition_type": "Strategic",
       "revenue": "154.5 AUD Million",
-      "valuation": "234.0 AUD Million",
-      "ev_revenue": "1.5x",
-      "ev_ebitda": "9.9x"
+      "valuation": "234 AUD Million",
+      "ev_revenue": "1.5145631067961165",
+      "ev_ebitda": "9.873417721518987"
     },
     {
-      "target": "Zipfizz Corporation",
-      "acquirer": "KUC Holding",
-      "type": "Sponsor",
-      "acquisition_type": "Financial",
-      "revenue": "71.9 AUD Million",
-      "valuation": "106.4 AUD Million",
-      "ev_revenue": "1.5x",
-      "ev_ebitda": "NA"
-    },
-    {
-      "target": "Lotte Chilsung Beverage Co., Ltd. (KOSE:A005300)",
-      "acquirer": "LOTTE Corporation (KOSE:A004990)",
+      "target": "American Beverage Corporation",
+      "acquirer": "Harvest Hill Beverage Company",
       "type": "Strategic",
       "acquisition_type": "Strategic",
-      "revenue": "2760.3 AUD Million",
-      "valuation": "3008.7 AUD Million",
-      "ev_revenue": "1.1x",
-      "ev_ebitda": "13.2x"
+      "revenue": "148.2791586998088 AUD Million",
+      "valuation": "77.55 AUD Million",
+      "ev_revenue": "NA",
+      "ev_ebitda": "6.56"
+    },
+    {
+      "target": "LevlUp GmbH",
+      "acquirer": "Glanbia plc (ISE:GL9)",
+      "type": "Strategic",
+      "acquisition_type": "Strategic",
+      "revenue": "30.235887806595453 AUD Million",
+      "valuation": "88.7980284004225 AUD Million",
+      "ev_revenue": "2.93684210526316",
+      "ev_ebitda": "NA"
     }
   ],
   "transaction_count": 10,
