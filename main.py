@@ -144,10 +144,7 @@ def analyze_competitors(request: AnalysisRequest):
         if not file_paths:
             return AnalysisResponse(
                 target_company=request.target_company,
-                data_type='public_comps', # Default to public if nothing found, or should this be error?
-                # User asked for "file not found" to be error. Here "no paths found" is slightly different.
-                # But let's keep it as is for "no paths found" (valid response), 
-                # strictly handling "crashes" as errors.
+                data_type='error',
                 verified_competitors=[],
                 to_crosscheck=[],
                 verified_count=0,
