@@ -437,6 +437,38 @@ class CopilotResponseProcessor:
         
         # Apply filtering and balancing logic
         self.file_paths = self._filter_and_balance_files(unique_paths)
+        
+        # If no paths found, try secondary extraction strategy (Split Source/Path)
+        if not self.file_paths:
+             # Pattern to capture Source (filename) and Full Path (folder) when separated
+             # Matches: Source: [filename] ... Full Path: [folder]
+             secondary_pattern = r'Source:\s*([^\n\r]+)(?:[\s\S]*?)Full Path:\s*([^\n\r]+)'
+             matches = re.findall(secondary_pattern, self.copilot_response, re.IGNORECASE)
+             
+             constructed_paths = []
+             for filename, folder in matches:
+                 filename = filename.strip()
+                 folder = folder.strip()
+                 
+                 # clean potential artifacts
+                 if "View File" in folder: 
+                     folder = folder.split("View File")[0].strip()
+                     
+                 # Construct full path
+                 # Check if folder already contains filename to avoid duplication
+                 if filename in folder:
+                     full_path = folder
+                 else:
+                     full_path = f"{folder}/{filename}".replace("//", "/")
+                     
+                 # Allow only valid extensions
+                 if any(full_path.lower().endswith(ext) for ext in ['.xlsx', '.xls', '.csv', '.pptx', '.pdf']):
+                     constructed_paths.append(full_path)
+             
+             if constructed_paths:
+                 # Re-filter/balance with these mew paths
+                 unique_paths = list(set(constructed_paths))
+                 self.file_paths = self._filter_and_balance_files(unique_paths)
 
         # Extract relative paths and normalize them for SharePoint structure
         # Note: Drive ID points to "Shared Documents", so paths should NOT include it
@@ -448,7 +480,7 @@ class CopilotResponseProcessor:
             
             # Normalize path variations to standard folder names
             # Replace "/Public/" or "/Public Comps/" variations with "/Public Comps/"
-            import re
+            # import re (Removed to fix UnboundLocalError)
             # Match patterns like: /Public/, /Public Comps/, /public/, etc.
             path = re.sub(r'/Public(?:\s+Comps)?/', '/Public Comps/', path, flags=re.IGNORECASE)
             # Also handle if it starts with "Public" or "Public Comps"
