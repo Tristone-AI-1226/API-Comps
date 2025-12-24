@@ -431,8 +431,13 @@ class CopilotResponseProcessor:
     def extract_file_paths(self):
         """Extract unique file paths from copilot response and apply filtering logic."""
         # Pattern to match "Full Path: " followed by the path, cut at file extraction
-        pattern = r'Full Path:\s*(.+?\.(?:xlsx|xls|csv|pptx|pdf))'
+        pattern = r'Full Path:\s*([^\n\r]+?\.(?:xlsx|xls|csv|pptx|pdf))'
         matches = re.findall(pattern, self.copilot_response, re.IGNORECASE)
+        
+        # Explicit safety filter: exclude matches that span lines (newlines/formatting issues)
+        # Also filter out obviously too long paths or paths containing metadata keywords
+        matches = [m for m in matches if '\n' not in m and '\r' not in m and len(m) < 300 and "Modified By" not in m and "Source:" not in m and "Modifier Email" not in m and "Last Modified" not in m]
+        
         unique_paths = list(set([path.strip() for path in matches]))
         
         # Apply filtering and balancing logic
